@@ -202,7 +202,7 @@ fun ManualReviewQuestionBlock(
         Button(
             onClick = {
                 val result = grades.map {
-                    ManualGrade(questionIndex, it.key.trim(), it.value.toInt())
+                    ManualGrade(questionIndex, it.key.trim().lowercase(), it.value.toInt())
                 }
                 onSubmit(result)
             }

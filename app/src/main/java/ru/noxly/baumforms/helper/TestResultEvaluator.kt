@@ -44,7 +44,7 @@ object TestResultEvaluator {
                 }
 
                 AnswerType.LECTURE, AnswerType.FREE_FORM -> {
-                    val answerKey = index to (answer?.answerText?.trim().orEmpty())
+                    val answerKey = index to (answer?.answerText?.trim()?.lowercase().orEmpty())
                     if (manualScores.containsKey(answerKey)) {
                         totalScore += manualScores[answerKey] ?: 0
                     } else if (!answer?.answerText.isNullOrBlank()) {
