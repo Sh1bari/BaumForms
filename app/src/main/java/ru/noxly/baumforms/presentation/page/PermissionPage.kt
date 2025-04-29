@@ -29,7 +29,7 @@ fun PermissionPage(navController: NavController) {
     LaunchedEffect(Unit) {
         // Заглушка на "будущую" проверку пермитов
         scope.launch {
-            delay(1500) // эмуляция проверки (можно убрать позже)
+            delay(0) // эмуляция проверки (можно убрать позже)
             navController.navigate(Screen.Home.route) {
                 popUpTo(Screen.Permission.route) { inclusive = true }
             }

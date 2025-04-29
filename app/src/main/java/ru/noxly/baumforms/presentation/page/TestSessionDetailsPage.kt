@@ -126,7 +126,7 @@ fun TestSessionDetailsPage(
                             Text("Перейти к оцениванию")
                         }
 
-                        Button(onClick = { viewModel.exportResultsToExcel(s.id) }) {
+                        Button(onClick = { viewModel.exportFullResults(s.id) }) {
                             Text("Скачать результаты")
                         }
 

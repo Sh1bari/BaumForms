@@ -14,11 +14,14 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
+import org.apache.poi.ss.util.CellReference
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import ru.noxly.baumforms.db.entity.StudentEntity
 import ru.noxly.baumforms.db.entity.TestSessionEntity
 import ru.noxly.baumforms.helper.TestResultEvaluator
+import ru.noxly.baumforms.model.AnswerType
 import ru.noxly.baumforms.model.ManualGrade
+import ru.noxly.baumforms.model.StudentAnswer
 import ru.noxly.baumforms.model.TestQuestion
 import ru.noxly.baumforms.service.ExcelService
 import ru.noxly.baumforms.service.StudentService
@@ -61,7 +64,7 @@ class TestSessionViewModel @Inject constructor(
         }
     }
 
-    fun exportResultsToExcel(sessionId: Int) {
+    fun exportFullResults(sessionId: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val session = sessionService.getSessionById(sessionId).firstOrNull()
@@ -85,59 +88,119 @@ class TestSessionViewModel @Inject constructor(
                     (it.questionIndex to it.answerText.trim().lowercase()) to it.score
                 }
 
-                for (student in students) {
-                    val (_, pending, _) = TestResultEvaluator.evaluate(
-                        session.questionsJson,
-                        student.answersJson ?: "[]",
-                        manualMap
-                    )
-                    if (pending > 0) {
-                        _errorMessage.value = "Не все ответы проверены. Завершите ручную оценку."
-                        return@launch
-                    }
-                }
-
                 val workbook = XSSFWorkbook()
                 val sheet = workbook.createSheet("Результаты")
-                val header = sheet.createRow(0)
 
-                header.createCell(0).setCellValue("Группа")
-                header.createCell(1).setCellValue("Студент")
-                header.createCell(2).setCellValue("Балл")
+                // Заголовки
+                val headerRow1 = sheet.createRow(0)
+                val headerRow2 = sheet.createRow(1)
+                headerRow1.createCell(0).setCellValue("ФИО")
+                headerRow1.createCell(1).setCellValue("Группа")
+                headerRow2.createCell(0).setCellValue("Ответ")
+                headerRow2.createCell(1).setCellValue("Правильный ответ")
 
-                students.forEachIndexed { i, student ->
-                    val row = sheet.createRow(i + 1)
+                questions.forEachIndexed { index, q ->
+                    val col = 2 + index * 2
+                    val optionsText = if (q.type == AnswerType.SINGLE_CHOICE || q.type == AnswerType.MULTIPLE_CHOICE)
+                        " [${q.options.joinToString("; ")}]" else ""
+                    headerRow1.createCell(col).setCellValue("Вопрос ${index + 1}: ${q.question}$optionsText")
+                    val correct = when (q.type) {
+                        AnswerType.SINGLE_CHOICE, AnswerType.MULTIPLE_CHOICE -> q.correctAnswers.joinToString(", ")
+                        else -> q.answer ?: ""
+                    }
+                    headerRow2.createCell(col).setCellValue(correct)
+                    headerRow1.createCell(col + 1).setCellValue("Тип: ${q.type.name}")
+                    headerRow2.createCell(col + 1).setCellValue("Макс. балл: ${q.maxScore}")
+                    sheet.setColumnWidth(col, 8000)
+                    sheet.setColumnWidth(col + 1, 4000)
+                }
+
+                val sumColIndex = 2 + questions.size * 2
+                headerRow1.createCell(sumColIndex).setCellValue("Сумма")
+                headerRow2.createCell(sumColIndex).setCellValue("")
+
+                students.forEachIndexed { studentIdx, student ->
+                    val row = sheet.createRow(studentIdx + 2)
+                    row.createCell(0).setCellValue(student.fullName)
+                    row.createCell(1).setCellValue(student.group)
+
+                    val answers = if (!student.answersJson.isNullOrBlank()) {
+                        Gson().fromJson<List<StudentAnswer>>(
+                            student.answersJson,
+                            object : TypeToken<List<StudentAnswer>>() {}.type
+                        )
+                    } else emptyList()
+
+                    val answerMap = answers.associateBy { it.questionIndex }
+
+                    questions.forEachIndexed { qIdx, question ->
+                        val answer = answerMap[qIdx]
+                        val col = 2 + qIdx * 2
+                        val responseText = when (question.type) {
+                            AnswerType.LECTURE, AnswerType.FREE_FORM -> answer?.answerText ?: ""
+                            else -> answer?.selectedOptions?.joinToString(", ") ?: ""
+                        }
+
+                        val score = when (question.type) {
+                            AnswerType.SINGLE_CHOICE, AnswerType.MULTIPLE_CHOICE -> {
+                                val correctSet = question.correctAnswers.toSet()
+                                val selectedSet = answer?.selectedOptions?.toSet() ?: emptySet()
+                                val correctMatches = selectedSet.intersect(correctSet).size
+                                val extraSelections = selectedSet.subtract(correctSet).size
+                                val totalSelections = correctMatches + extraSelections
+                                if (totalSelections > 0 && correctSet.isNotEmpty()) {
+                                    kotlin.math.ceil(correctMatches.toDouble() / totalSelections * question.maxScore).toInt()
+                                } else 0
+                            }
+
+                            else -> {
+                                val key = qIdx to (answer?.answerText?.trim()?.lowercase().orEmpty())
+                                manualMap[key] ?: 0
+                            }
+                        }
+
+                        row.createCell(col).setCellValue(responseText)
+                        row.createCell(col + 1).setCellValue(score.toDouble())
+                    }
+
+                    // Формула суммы баллов только по колонкам с баллами (начиная с D, через одну)
+                    val scoreColumns = (0 until questions.size).map { qIdx ->
+                        CellReference.convertNumToColString(3 + qIdx * 2)
+                    }
+                    val excelRowNum = row.rowNum + 1
+                    val formula = scoreColumns.joinToString("+") { "$it$excelRowNum" }
+                    row.createCell(sumColIndex).cellFormula = formula
+                }
+
+                // Второй лист - "Итог"
+                val summarySheet = workbook.createSheet("Итог")
+                val summaryHeader = summarySheet.createRow(0)
+                summaryHeader.createCell(0).setCellValue("Группа")
+                summaryHeader.createCell(1).setCellValue("ФИО")
+                summaryHeader.createCell(2).setCellValue("Сумма баллов")
+
+                students.forEachIndexed { index, student ->
+                    val row = summarySheet.createRow(index + 1)
                     row.createCell(0).setCellValue(student.group)
                     row.createCell(1).setCellValue(student.fullName)
 
-                    val (score, _, _) = TestResultEvaluator.evaluate(
-                        session.questionsJson,
-                        student.answersJson ?: "[]",
-                        manualMap
-                    )
-                    row.createCell(2).setCellValue(score.toDouble())
+                    // Ссылка на итоговую колонку с листа "Результаты"
+                    val formula = "Результаты!${CellReference.convertNumToColString(sumColIndex)}${index + 3}"
+                    row.createCell(2).cellFormula = formula
                 }
 
-                // 👉 Получаем ту же директорию, куда сохранился исходный Excel-файл
-                val originalDir = session.filePath?.let { File(it).parentFile }
+                val outputDir = session.filePath?.let { File(it).parentFile }
                     ?: File(Environment.getExternalStorageDirectory(), "Download")
-
-                val safeSessionName = session.name.replace("\\W+".toRegex(), "_")
-                val randomPart = (1000..9999).random()
-                val resultFileName = "Result_${safeSessionName}_$randomPart.xlsx"
-
-                val file = File(originalDir, resultFileName).apply {
-                    parentFile?.mkdirs()
-                }
+                val fileName = "FullResults_${session.name.replace("\\W+".toRegex(), "_")}_${System.currentTimeMillis()}.xlsx"
+                val file = File(outputDir, fileName)
 
                 FileOutputStream(file).use { workbook.write(it) }
                 workbook.close()
 
                 _exportedFilePath.value = file.absolutePath
-                //_errorMessage.value = "Файл создан: ${file.absolutePath}"
 
             } catch (e: Exception) {
-                _errorMessage.value = "Ошибка при экспорте: ${e.message}"
+                _errorMessage.value = "Ошибка экспорта: ${e.message}"
             }
         }
     }
